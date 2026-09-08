@@ -13,8 +13,8 @@ OUTPUT_DIR="${OUTPUT_DIR:-dist}"
 log() { printf '[build-ipk] %s\n' "$*"; }
 die() { printf '[build-ipk] ERROR: %s\n' "$*" >&2; exit 1; }
 
-command -v ar >/dev/null 2>&1 || die "缺少 ar 命令(binutils)"
 command -v tar >/dev/null 2>&1 || die "缺少 tar 命令"
+command -v gzip >/dev/null 2>&1 || die "缺少 gzip 命令"
 command -v python3 >/dev/null 2>&1 || die "缺少 python3 命令"
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -194,7 +194,10 @@ IPK_NAME="${PACKAGE_NAME}_${VERSION}-${PACKAGE_RELEASE}_${PACKAGE_ARCH}.ipk"
 rm -f "$OUTPUT_DIR/$IPK_NAME" "$OUTPUT_DIR/$IPK_NAME.sha256"
 (
   cd "$PKG"
-  ar r "$OUTPUT_DIR/$IPK_NAME" debian-binary control.tar.gz data.tar.gz >/dev/null
+  # OpenWrt/iStoreOS 的 opkg 使用 gzip 压缩的 tar 作为 IPK 外层格式。
+  # 不可使用 Debian 的 ar 外层；iStoreOS 会将其报告为 Malformed package file。
+  tar --format=gnu --numeric-owner --owner=0 --group=0 \
+    -cf - debian-binary data.tar.gz control.tar.gz | gzip -n > "$OUTPUT_DIR/$IPK_NAME"
 )
 (
   cd "$OUTPUT_DIR"

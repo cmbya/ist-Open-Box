@@ -43,7 +43,7 @@ IPK=$(find "$OUT" -maxdepth 1 -name 'open-box_*_x86_64.ipk' -print -quit)
 
 EXTRACT="$TMP/extract"
 mkdir -p "$EXTRACT"
-(cd "$EXTRACT" && ar x "$IPK")
+(cd "$EXTRACT" && tar -xzf "$IPK")
 [ "$(cat "$EXTRACT/debian-binary")" = "2.0" ]
 
 tar -xzf "$EXTRACT/control.tar.gz" -C "$EXTRACT"

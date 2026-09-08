@@ -101,7 +101,7 @@ jobs:
           ipk=$(find dist -maxdepth 1 -name 'open-box_*_x86_64.ipk' -print -quit)
           test -n "$ipk"
           mkdir verify
-          (cd verify && ar x "../$ipk")
+          (cd verify && tar -xzf "../$ipk")
           test "$(cat verify/debian-binary)" = "2.0"
           tar -tzf verify/control.tar.gz > verify/control-files.txt
           tar -tzf verify/data.tar.gz > verify/data-files.txt
