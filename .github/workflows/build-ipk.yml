@@ -1,0 +1,142 @@
+name: Build iStoreOS IPK
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Rebuild even if this upstream release already exists
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: '20 18 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: open-box-ipk-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: liandu2024/Open-Box
+  ASSET_NAME: open-box-linux-x64.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout packaging repository
+        uses: actions/checkout@v4
+
+      - name: Resolve latest upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild || 'false' }}
+        run: |
+          set -euo pipefail
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${UPSTREAM_REPO}/releases/latest" > upstream-release.json
+
+          python3 - "$ASSET_NAME" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, sys
+          data = json.load(open("upstream-release.json", encoding="utf-8"))
+          wanted = sys.argv[1]
+          assets = {a["name"]: a["browser_download_url"] for a in data.get("assets", [])}
+          checksum = wanted + ".sha256"
+          missing = [name for name in (wanted, checksum) if name not in assets]
+          if missing:
+              raise SystemExit("latest upstream release is missing: " + ", ".join(missing))
+          print(f"upstream_tag={data['tag_name']}")
+          print(f"source_url={assets[wanted]}")
+          print(f"sha256_url={assets[checksum]}")
+          print(f"release_tag=upstream-{data['tag_name']}")
+          PY
+
+          upstream_tag=$(python3 -c 'import json; print(json.load(open("upstream-release.json"))["tag_name"])')
+          release_tag="upstream-${upstream_tag}"
+          if gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" > existing-release.json 2>existing-release.err; then
+            status=200
+          else
+            status=$(python3 - <<'PY'
+          import re
+          text = open("existing-release.err", encoding="utf-8", errors="replace").read()
+          match = re.search(r"HTTP ([0-9]{3})", text)
+          print(match.group(1) if match else "error")
+          PY
+            )
+          fi
+
+          if [ "$status" = 200 ] && [ "$FORCE_REBUILD" != true ]; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "Release ${release_tag} already exists; skipping."
+          elif [ "$status" = 200 ] || [ "$status" = 404 ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unexpected GitHub API status: $status" >&2
+            cat existing-release.json >&2
+            exit 1
+          fi
+
+      - name: Build IPK
+        if: steps.upstream.outputs.should_build == 'true'
+        env:
+          SOURCE_URL: ${{ steps.upstream.outputs.source_url }}
+          SOURCE_SHA256_URL: ${{ steps.upstream.outputs.sha256_url }}
+          OUTPUT_DIR: dist
+        run: |
+          chmod +x scripts/build-ipk.sh
+          scripts/build-ipk.sh
+
+      - name: Verify IPK structure
+        if: steps.upstream.outputs.should_build == 'true'
+        run: |
+          set -euo pipefail
+          ipk=$(find dist -maxdepth 1 -name 'open-box_*_x86_64.ipk' -print -quit)
+          test -n "$ipk"
+          mkdir verify
+          (cd verify && ar x "../$ipk")
+          test "$(cat verify/debian-binary)" = "2.0"
+          tar -tzf verify/control.tar.gz | grep -q '^control$'
+          tar -tzf verify/data.tar.gz | grep -q '^./opt/open-box/meta.json$'
+          tar -tzf verify/data.tar.gz | grep -q '^./etc/init.d/openbox-panel$'
+          (cd dist && sha256sum -c "$(basename "$ipk").sha256")
+
+      - name: Upload Actions artifact
+        if: steps.upstream.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-box-istoreos-x86_64-${{ steps.upstream.outputs.upstream_tag }}
+          path: |
+            dist/*.ipk
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release
+        if: steps.upstream.outputs.should_build == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.upstream.outputs.release_tag }}
+          name: Open-Box iStoreOS IPK ${{ steps.upstream.outputs.upstream_tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.ipk
+            dist/*.sha256
+          body: |
+            基于 [liandu2024/Open-Box ${{ steps.upstream.outputs.upstream_tag }}](https://github.com/liandu2024/Open-Box/releases/tag/${{ steps.upstream.outputs.upstream_tag }}) 官方 x64 Release 资产重新封装。
+
+            - 目标系统：iStoreOS / OpenWrt
+            - CPU 架构：x86_64
+            - 安装方式：在 iStoreOS 软件包页面上传 IPK，或执行 `opkg install ./open-box_*.ipk`
+            - 升级及卸载默认保留 `/opt/open-box/data/`
+            - 安装后自动启用并启动 Open-Box 面板，不自动启动代理内核
